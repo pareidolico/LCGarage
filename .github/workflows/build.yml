@@ -1,0 +1,54 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: write   # lets a push to main publish a release for a new version
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ziglang pefile
+      - run: ./build.sh
+      - name: Test plate rules and the cars file
+        run: ./tests/run.sh
+      - name: Check the plugin
+        run: |
+          python - <<'PY'
+          import pefile
+          pe = pefile.PE("build/LCGarage.asi")
+          assert pe.FILE_HEADER.Machine == 0x14c, "not 32-bit x86"
+          assert pe.is_dll(), "not a DLL"
+          dlls = sorted(e.dll.decode().lower() for e in pe.DIRECTORY_ENTRY_IMPORT)
+          assert set(dlls) <= {"kernel32.dll", "user32.dll"}, dlls  # Windows' own DLLs only
+          print("ok:", dlls)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LCGarage
+          path: |
+            build/LCGarage.asi
+            LCGarage.ini
+      - name: Release this version if it's new
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER=$(sed -n 's/^#define VERSION "\(.*\)"/\1/p' src/lcgarage.c)
+          TAG="v$VER"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG is already released"
+            exit 0
+          fi
+          mkdir -p dist/LCGarage
+          cp build/LCGarage.asi LCGarage.ini README.md LICENSE dist/LCGarage/
+          (cd dist && zip -r "LCGarage-$TAG.zip" LCGarage)
+          gh release create "$TAG" "dist/LCGarage-$TAG.zip" --target "$GITHUB_SHA" \
+            --title "LCGarage $VER" --notes-file RELEASE_NOTES.md
